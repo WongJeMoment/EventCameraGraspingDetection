@@ -167,7 +167,7 @@ def build_targets(
     grasps,
     img_h,
     img_w,
-    stride=4,
+    stride=1,
     sigma=2.0,
 ):
     """

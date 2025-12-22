@@ -24,7 +24,7 @@ from matrix_viz import MatrixVisualizer
 # ============================================================
 # 0) Reproducibility
 # ============================================================
-def set_seed(seed: int = 42):
+def set_seed(seed: int = 21):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -35,13 +35,17 @@ def set_seed(seed: int = 42):
 # 1) boxes -> GT maps (baseline)
 # ============================================================
 def _order_points_clockwise(pts: torch.Tensor) -> torch.Tensor:
+    # 计算所有点的中心点
     center = pts.mean(dim=0, keepdim=True)
+    # 计算每个点相对于中心的向量
     v = pts - center
+    # 计算每个向量的角度
     ang = torch.atan2(v[:, 1], v[:, 0])
+    # 根据角度排序点
     idx = torch.argsort(ang)
     return pts[idx]
 
-
+# 估计主方向角度 θ和短边宽度 width
 def _estimate_angle_width(pts: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     p = _order_points_clockwise(pts)
     e0 = p[1] - p[0]
@@ -59,7 +63,7 @@ def _estimate_angle_width(pts: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor
     theta = torch.atan2(direction[1], direction[0])
     return theta, width
 
-
+# 把一个四边形（或任意点集）转换成一个轴对齐的矩形包围框
 def _bbox_from_quad(pts: torch.Tensor) -> Tuple[int, int, int, int]:
     x0 = int(torch.min(pts[:, 0]).item())
     y0 = int(torch.min(pts[:, 1]).item())
@@ -67,11 +71,11 @@ def _bbox_from_quad(pts: torch.Tensor) -> Tuple[int, int, int, int]:
     y1 = int(torch.max(pts[:, 1]).item())
     return x0, y0, x1, y1
 
-
+# 把 boxes（框）转换成 gt maps（监督特征图）
 def boxes_to_gt_maps(
     boxes_norm: torch.Tensor,
     out_hw: Tuple[int, int],
-    max_boxes_used: int = 20,
+    max_boxes_used: int = 6,
 ) -> Dict[str, torch.Tensor]:
     """
     boxes_norm: (K,8) normalized quad points (x,y)*4 in [0,1]
@@ -160,7 +164,7 @@ def decode_maps_to_boxes_norm(
     topk: int = 5,
     q_thresh: float = 0.5,
     grasp_h_ratio: float = 0.5,
-    width_scale: float = 2.0,
+    width_scale: float = 5.0,
 ) -> torch.Tensor:
     """
     pred_one:
@@ -360,14 +364,12 @@ def train_one_epoch(cfg: TrainConfig, epoch: int, model, loader, optimizer, crit
     total_loss = 0.0
     n = 0
 
-    viz_every = getattr(cfg, "viz_every", 0)          # 0 disables
+    viz_every = getattr(cfg, "viz_every", 1)          # 0 disables
     viz_max_steps = getattr(cfg, "viz_max_steps", 0)  # 0 means no limit per epoch
     step_idx = 0
 
     # reuse one window for the whole epoch
     viz_fig, viz_ax = (None, None)
-    if viz_every > 0:
-        viz_fig, viz_ax = plt.subplots(figsize=(6, 6))
 
     for x, boxes_list in loader:
         x = x.to(cfg.device, non_blocking=True)
@@ -479,13 +481,15 @@ def visualize_val_set(cfg: TrainConfig, model, val_set: GraspTxtDataset, viz: Ma
 # 8) Main
 # ============================================================
 def main():
+    # 读入训练超参
     cfg = TrainConfig()
+    # 固定随机种子
     set_seed(cfg.seed)
     os.makedirs(cfg.ckpt_dir, exist_ok=True)
 
     # ---------- safe defaults ----------
     if not hasattr(cfg, "viz_every"):
-        cfg.viz_every = 50
+        cfg.viz_every = 1
     if not hasattr(cfg, "viz_max_steps"):
         cfg.viz_max_steps = 10
     if not hasattr(cfg, "viz_topk"):
@@ -539,7 +543,7 @@ def main():
     criterion = GraspLoss(w_q=cfg.w_q, w_a=cfg.w_a, w_w=cfg.w_w).to(cfg.device)
 
     # only used if val_viz_enable=True
-    viz = MatrixVisualizer(pause_time=0.2)
+    viz = MatrixVisualizer(pause_time=0.1)
 
     best = 1e9
     for epoch in range(1, cfg.epochs + 1):
