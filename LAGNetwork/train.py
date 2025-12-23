@@ -6,7 +6,7 @@ warnings.filterwarnings("ignore", message="TypedStorage is deprecated")
 import os
 import random
 from typing import Dict, Tuple, List
-
+import math
 import numpy as np
 import torch
 import torch.nn as nn
@@ -242,45 +242,46 @@ def _draw_quads_on_ax(
 # ============================================================
 @torch.no_grad()
 def visualize_train_batch_boxes(
-    cfg: TrainConfig,
-    x: torch.Tensor,
-    boxes_list: List[torch.Tensor],
-    pred: Dict[str, torch.Tensor],
-    epoch: int,
-    step: int,
-    fig=None,
-    ax=None,
+        cfg: TrainConfig,
+        x: torch.Tensor,
+        boxes_list: List[torch.Tensor],
+        pred: Dict[str, torch.Tensor],
+        epoch: int,
+        step: int,
+        fig=None,  # 这里不需要传入 fig/ax，我们每次新建一个大图
+        ax=None,
 ):
-    """
-    ✅ Fix white alternating frames:
-      - reuse a single fig/ax
-      - do NOT close('all')
-      - force draw/flush/pause
-    ✅ Also: NO MatrixVisualizer here.
-    """
     B, _, H_img, W_img = x.shape
     x_cpu = x.detach().cpu()
     Hm, Wm = pred["quality"].shape[-2], pred["quality"].shape[-1]
 
-    if fig is None or ax is None:
-        fig, ax = plt.subplots(figsize=(6, 6))
+    # 1. 计算网格行列 (例如 Batch=8 -> 2行4列)
+    ncols = 4  # 你可以根据需要调整，比如 4 列
+    nrows = math.ceil(B / ncols)
+
+    # 2. 创建一个包含多个子图的大图
+    # figsize 可以根据行列数自动调整
+    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4, nrows * 4))
+    axes = axes.flatten()  # 展平方便遍历
 
     for i in range(B):
-        ax.clear()
+        ax_curr = axes[i]
 
+        # 处理图片
         img = x_cpu[i].permute(1, 2, 0).numpy()
         img = np.clip(img, 0, 1)
 
+        # 处理 GT Boxes
         gt_boxes = boxes_list[i]
         if isinstance(gt_boxes, torch.Tensor):
             gt_boxes = gt_boxes.to(cfg.device)
 
+        # 处理预测
         pred_one = {
             "quality": pred["quality"][i],
             "angle": pred["angle"][i],
             "width": pred["width"][i],
         }
-
         pred_boxes_img_norm = decode_maps_to_boxes_norm(
             pred_one,
             topk=getattr(cfg, "viz_topk", 5),
@@ -289,25 +290,34 @@ def visualize_train_batch_boxes(
             width_scale=getattr(cfg, "viz_width_scale", 2.0),
         )
 
-        ax.imshow(img)
-        ax.set_title(f"Train | Epoch {epoch} Step {step} | GT(green) vs Pred(red) | {i} | map {Hm}x{Wm}")
-        ax.axis("off")
+        # 绘图
+        ax_curr.imshow(img)
+        ax_curr.set_title(f"Batch {i} | E{epoch} S{step}", fontsize=8)
+        ax_curr.axis("off")
 
-        _draw_quads_on_ax(ax, gt_boxes, H_img, W_img, color="lime", lw=2.0)
-        _draw_quads_on_ax(ax, pred_boxes_img_norm, H_img, W_img, color="red", lw=2.0)
+        _draw_quads_on_ax(ax_curr, gt_boxes, H_img, W_img, color="lime", lw=1.5)
+        _draw_quads_on_ax(ax_curr, pred_boxes_img_norm, H_img, W_img, color="red", lw=1.5)
 
-        # force render
-        fig.canvas.draw_idle()
-        fig.canvas.flush_events()
-        plt.pause(getattr(cfg, "viz_pause", 0.05))
+    # 3. 隐藏多余的空白子图 (如果 Batch 不是 ncols 的倍数)
+    for k in range(B, len(axes)):
+        axes[k].axis("off")
 
-        if getattr(cfg, "viz_save", False):
-            save_dir = os.path.join(cfg.ckpt_dir, "viz_train")
-            os.makedirs(save_dir, exist_ok=True)
-            out = os.path.join(save_dir, f"e{epoch:03d}_s{step:06d}_i{i}.png")
-            fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.tight_layout()
 
-    return fig, ax
+    # 4. 显示或保存
+    # 训练中建议只保存，不显示，因为 plt.show() 会阻塞训练
+    if getattr(cfg, "viz_save", True):
+        save_dir = os.path.join(cfg.ckpt_dir, "viz_train")
+        os.makedirs(save_dir, exist_ok=True)
+        out = os.path.join(save_dir, f"e{epoch:03d}_s{step:06d}_batch.png")
+        fig.savefig(out, dpi=150, bbox_inches="tight")
+        plt.close(fig)  # 保存后必须关闭，防止内存泄漏
+    else:
+        # 如果你确实想看动态弹出窗口
+        plt.pause(1.0)  # 暂停一下让你看清楚
+        plt.close(fig)
+
+    return fig, axes
 
 
 # ============================================================
@@ -457,12 +467,16 @@ def eval_one_epoch(cfg: TrainConfig, model, loader, criterion):
 # 7) OPTIONAL: Visualize val set (MatrixVisualizer) - DISABLED by default
 #    This is where your "white matrix" windows come from.
 # ============================================================
+# 结果可视化
 @torch.no_grad()
 def visualize_val_set(cfg: TrainConfig, model, val_set: GraspTxtDataset, viz: MatrixVisualizer, epoch: int):
     model.eval()
 
+    # 遍历整个验证集
     for sample_idx in range(len(val_set)):
+        # 取出单个样本
         x_one, boxes_one = val_set[sample_idx]
+        # 添加 batch 维度并移动到设备上
         x_one = x_one.unsqueeze(0).to(cfg.device)
 
         pred_one = model(x_one)
@@ -473,7 +487,7 @@ def visualize_val_set(cfg: TrainConfig, model, val_set: GraspTxtDataset, viz: Ma
             (Hm, Wm),
             max_boxes_used=cfg.max_boxes_used
         )
-
+        # 可视化 GT vs 预测
         viz.show(gt=gt_one, pred=pred_one, epoch=epoch, sample_idx=sample_idx)
 
 
