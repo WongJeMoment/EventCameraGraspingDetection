@@ -284,10 +284,10 @@ def visualize_train_batch_boxes(
         }
         pred_boxes_img_norm = decode_maps_to_boxes_norm(
             pred_one,
-            topk=getattr(cfg, "viz_topk", 5),
-            q_thresh=getattr(cfg, "viz_q_thresh", 0.5),
+            topk=getattr(cfg, "viz_topk", 1),
+            q_thresh=getattr(cfg, "viz_q_thresh", 0.1),
             grasp_h_ratio=getattr(cfg, "viz_h_ratio", 0.5),
-            width_scale=getattr(cfg, "viz_width_scale", 2.0),
+            width_scale=getattr(cfg, "viz_width_scale", 3.0),
         )
 
         # 绘图
@@ -324,7 +324,7 @@ def visualize_train_batch_boxes(
 # 4) Loss
 # ============================================================
 class GraspLoss(nn.Module):
-    def __init__(self, w_q=1.0, w_a=1.0, w_w=1.0):
+    def __init__(self, w_q=1.0, w_a=1.0, w_w=2.0):
         super().__init__()
         self.w_q = w_q
         self.w_a = w_a
@@ -500,6 +500,7 @@ def main():
     # 固定随机种子
     set_seed(cfg.seed)
     os.makedirs(cfg.ckpt_dir, exist_ok=True)
+    print(f"\n[Info] Models will be saved to: {os.path.abspath(cfg.ckpt_dir)}\n")
 
     # ---------- safe defaults ----------
     if not hasattr(cfg, "viz_every"):
@@ -507,15 +508,15 @@ def main():
     if not hasattr(cfg, "viz_max_steps"):
         cfg.viz_max_steps = 10
     if not hasattr(cfg, "viz_topk"):
-        cfg.viz_topk = 5
+        cfg.viz_topk = 1
     if not hasattr(cfg, "viz_q_thresh"):
-        cfg.viz_q_thresh = 0.5
+        cfg.viz_q_thresh = 0.1
     if not hasattr(cfg, "viz_h_ratio"):
         cfg.viz_h_ratio = 0.5
     if not hasattr(cfg, "viz_pause"):
         cfg.viz_pause = 0.05
     if not hasattr(cfg, "viz_width_scale"):
-        cfg.viz_width_scale = 2.0
+        cfg.viz_width_scale = 3.0
 
     # save train viz?
     if not hasattr(cfg, "viz_save"):
@@ -566,18 +567,35 @@ def main():
 
         print(f"Epoch {epoch:03d} | train {tr_loss:.4f} | val {va_loss:.4f}")
 
-        # ✅ This is where the "white matrix" comes from -> now controlled by a flag
+        # 可视化部分（保持不变）
         if cfg.val_viz_enable and (epoch % cfg.val_viz_every_epoch == 0):
             visualize_val_set(cfg, model, val_set, viz, epoch)
 
+        # ==========================================
+        #  修改后的保存逻辑：同时保存 last 和 best
+        # ==========================================
+
+        # 1. 构建要保存的字典 (包含模型、优化器、epoch、配置)
+        checkpoint = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),  # 推荐：保存优化器状态以便续训
+            "epoch": epoch,  # 推荐：保存当前轮数
+            "cfg": cfg.__dict__,
+            "best_loss": best if va_loss >= best else va_loss
+        }
+
+        # 2. 保存“最新”模型 (last.pt) - 每个 epoch 都覆盖保存
+        last_path = os.path.join(cfg.ckpt_dir, "last.pt")
+        torch.save(checkpoint, last_path)
+
+        # 3. 保存“最优”模型 (best.pt) - 只有 loss 创新低时才覆盖
         if va_loss < best:
             best = va_loss
-            torch.save(
-                {"model": model.state_dict(), "cfg": cfg.__dict__},
-                os.path.join(cfg.ckpt_dir, "best.pt"),
-            )
+            best_path = os.path.join(cfg.ckpt_dir, "best.pt")
+            torch.save(checkpoint, best_path)
+            print(f"  --> New best model saved! (Val Loss: {best:.4f})")
 
-    print("Done. Best val loss:", best)
+    print(f"Done. Best val loss: {best:.4f}")
 
 
 if __name__ == "__main__":
