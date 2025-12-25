@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from LAGBlock import LAGBlock
+from LAGNetwork.LAGBlock import LAGBlock
 
 
 def conv_bn_relu(in_ch: int, out_ch: int, k: int = 3, s: int = 2, p: int | None = None) -> nn.Sequential:

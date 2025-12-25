@@ -15,10 +15,10 @@ from torch.utils.data import DataLoader
 
 import matplotlib.pyplot as plt
 
-from config import TrainConfig
-from model import GraspNetLAG
+from LAGNetwork.config import TrainConfig
+from LAGNetwork.model import GraspNetLAG
 from utils.grasp_dataset_txt import GraspTxtDataset
-from matrix_viz import MatrixVisualizer
+from LAGNetwork.matrix_viz import MatrixVisualizer
 
 
 # ============================================================
