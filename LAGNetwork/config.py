@@ -8,17 +8,17 @@ class TrainConfig:
     # -------------------------
     # Data paths
     # -------------------------
-    train_images: str = "/home/wangzhe/ICME2026/Dataset/Train/IMG"
-    train_labels: str = "/home/wangzhe/ICME2026/Dataset/Train/TXT"
-    val_images: str = "/home/wangzhe/ICME2026/Dataset/Train/IMG"
-    val_labels: str = "/home/wangzhe/ICME2026/Dataset/Train/TXT"
+    train_images: str = "/home/wangzhe/ICME2026/ALLDATASET/IMG/apple"
+    train_labels: str = "/home/wangzhe/ICME2026/ALLDATASET/Lable/apple"
+    val_images: str = "/home/wangzhe/ICME2026/ALLDATASET/IMG/apple"
+    val_labels: str = "/home/wangzhe/ICME2026/ALLDATASET/Lable/apple"
 
     # -------------------------
     # Training hyperparams
     # -------------------------
     image_size: int = 256
     batch_size: int = 4
-    num_workers: int = 2
+    num_workers: int = 1
     epochs: int = 500
     lr: float = 1e-3
     weight_decay: float = 1e-4
@@ -31,7 +31,7 @@ class TrainConfig:
     # -------------------------
     # Supervision from boxes
     # -------------------------
-    max_boxes_used: int = 6  # 每张图最多用多少个框来生成 GT maps（超出忽略）
+    max_boxes_used: int = 1  # 每张图最多用多少个框来生成 GT maps（超出忽略）
 
     # -------------------------
     # Loss weights

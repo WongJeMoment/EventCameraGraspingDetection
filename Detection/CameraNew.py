@@ -10,6 +10,9 @@ from typing import Tuple, Optional
 from LAGNetwork.model import GraspNetLAG
 from LAGNetwork.train import decode_maps_to_boxes_norm
 
+# ======== 你的事件发布器 ========
+from event_pub import B2Z1CmdPublisher
+
 # ======== Metavision 相关 ========
 sys.path.append("/usr/local/local/lib/python3.8/dist-packages/")
 
@@ -88,12 +91,19 @@ def quad_norm_to_aabb_px(boxes_norm: torch.Tensor, w: int, h: int):
     return x1, y1, x2, y2, cx, cy
 
 
-def draw_rect_and_center(frame: np.ndarray, boxes_norm: Optional[torch.Tensor], status: str):
+def draw_rect_center_and_corners(
+    frame: np.ndarray,
+    boxes_norm: Optional[torch.Tensor],
+    status: str
+) -> Tuple[np.ndarray, Optional[Tuple[int, int]], Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
     """
-    画矩形框 + 中心点，并返回 (cx, cy)。boxes_norm=None 时返回 None
+    画 AABB 矩形框 + 中心点，并返回:
+      - center: (cx, cy)
+      - tl: (x1, y1)  左上角
+      - br: (x2, y2)  右下角
     """
     if boxes_norm is None:
-        return frame, None
+        return frame, None, None, None
 
     h, w = frame.shape[:2]
     x1, y1, x2, y2, cx, cy = quad_norm_to_aabb_px(boxes_norm, w, h)
@@ -105,7 +115,7 @@ def draw_rect_and_center(frame: np.ndarray, boxes_norm: Optional[torch.Tensor], 
     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
     cv2.circle(frame, (cx, cy), 4, (255, 255, 255), -1)
 
-    return frame, (cx, cy)
+    return frame, (cx, cy), (x1, y1), (x2, y2)
 
 
 # =========================
@@ -149,25 +159,20 @@ class SimpleCenterKalman:
 
 
 # =========================
-# Tracker（点击：立即重定位+重置LK点+持续跟踪）
+# Tracker
 # =========================
 class RobustGraspTracker:
-    """
-    Translate-only + Slew-rate: 框形状固定，只平移，且限速平移避免瞬移
-    点击改为：一次性重定位到点击中心，并在当前帧重置 LK 特征点 -> 持续跟踪
-    """
     def __init__(self, model, device, input_size=320, conf_thresh=0.15):
         self.model = model
         self.device = device
         self.input_size = input_size
         self.conf_thresh = conf_thresh
-        self.smooth_factor = 0.35  # (0,1], smaller -> slower center movement
+        self.smooth_factor = 0.35
 
         self.is_tracking = False
         self.prev_gray = None
         self.prev_pts = None
         self.current_box_pts = None
-
         self.base_shape = None
 
         self.last_detect_time = 0.0
@@ -197,16 +202,13 @@ class RobustGraspTracker:
         self.target_center = None
         self.max_speed_ratio = 0.06
 
-        # ===== click-to-recenter (one-shot) =====
-        self.pending_click = None          # np.array([x,y]) waiting to apply
+        self.pending_click = None
         self.pending_hard_reset_kf = True
         self.click_flash_until = 0.0
 
-        # optional: cache last gray
         self.last_gray = None
         self.last_hw = None
 
-    # ---------- 点击接口：只设置 pending，不再每帧强制追 target ----------
     def set_manual_target(self, x: float, y: float, hard_reset_kf: bool = True):
         self.pending_click = np.array([float(x), float(y)], dtype=np.float32)
         self.pending_hard_reset_kf = hard_reset_kf
@@ -225,14 +227,8 @@ class RobustGraspTracker:
 
     def _max_step(self, box_pts: np.ndarray) -> float:
         diag = self._box_diag(box_pts)
-
-        # 原始步长（与框大小相关）
         base = max(6.0, self.max_speed_ratio * diag)
-
-        # 平滑系数：越小越慢
         base *= float(np.clip(self.smooth_factor, 0.05, 1.0))
-
-        # 额外保底：至少 1px/帧，避免完全不动
         return max(1.0, base)
 
     def _slew_to_target(self, current: np.ndarray, target: np.ndarray, max_step: float) -> np.ndarray:
@@ -266,10 +262,6 @@ class RobustGraspTracker:
         return torch.from_numpy(pts_copy.flatten()).unsqueeze(0).to(self.device).float()
 
     def _apply_click_recenter(self, frame_gray: np.ndarray, H: int, W: int) -> bool:
-        """
-        Apply pending click: 立即把框中心移动到点击位置（不走slew），
-        并在当前帧重置 LK 特征点，从新位置持续跟踪。
-        """
         if self.pending_click is None:
             return False
 
@@ -277,7 +269,6 @@ class RobustGraspTracker:
         hard_reset = self.pending_hard_reset_kf
         self.pending_click = None
 
-        # 如果还没有 base_shape（从未检测成功），构造一个默认正方形框
         if self.base_shape is None:
             side = 80.0
             half = side * 0.5
@@ -293,19 +284,16 @@ class RobustGraspTracker:
             cc = np.mean(self.current_box_pts, axis=0).astype(np.float32)
             self.base_shape = self.current_box_pts - cc
 
-        # 立刻移动中心（不slew）
         self.track_center = c.copy()
         self.target_center = c.copy()
         self.current_box_pts = (self.base_shape + self.track_center).astype(np.float32)
 
-        # 重置/更新 KF
         if hard_reset or (not self.kf_inited):
             self.kf.init(float(c[0]), float(c[1]))
             self.kf_inited = True
         else:
             self.kf.update(float(c[0]), float(c[1]))
 
-        # 在当前帧重置LK点
         pts = self._reseed_points(frame_gray, self.current_box_pts)
         self.prev_gray = frame_gray
         self.last_detect_time = time.time()
@@ -315,7 +303,6 @@ class RobustGraspTracker:
             self.prev_pts = pts.astype(np.float32)
             self.is_tracking = True
         else:
-            # 点太少：让后续走检测（但框已跳转到点击位置）
             self.prev_pts = None
             self.is_tracking = False
 
@@ -326,16 +313,13 @@ class RobustGraspTracker:
         frame_gray = cv2.cvtColor(frame_orig, cv2.COLOR_BGR2GRAY)
         H, W = frame_orig.shape[:2]
 
-        # cache
         self.last_gray = frame_gray
         self.last_hw = (H, W)
 
-        # ===== 点击：优先生效（立即跳转 + 重置LK点）=====
         if self._apply_click_recenter(frame_gray, H, W):
             box_norm = self._pts_to_norm_tensor(self.current_box_pts, W, H)
             return box_norm, "Tracking (Recentered by Click)"
 
-        # ===== 进入 LK 跟踪分支 =====
         if (
             self.is_tracking
             and self.prev_pts is not None
@@ -343,7 +327,6 @@ class RobustGraspTracker:
             and self.current_box_pts is not None
             and self.base_shape is not None
         ):
-            # 定期跑一次检测做纠偏（但 allow_reject，会拒绝大跳）
             if curr_time - self.last_detect_time > self.detect_interval:
                 det_box_norm, det_status = self._run_detection(frame_orig, frame_gray, allow_reject=True)
                 return det_box_norm, det_status
@@ -403,7 +386,6 @@ class RobustGraspTracker:
             if self.track_center is None:
                 self.track_center = prev_center.copy()
 
-            # 注意：这里不再被“手动目标”每帧覆盖
             self.target_center = kf_center
 
             step = self._max_step(self.current_box_pts)
@@ -433,24 +415,14 @@ class RobustGraspTracker:
             box_norm = self._pts_to_norm_tensor(self.current_box_pts, W, H)
             return box_norm, status_str
 
-        # 不在tracking状态 -> 跑检测
         return self._run_detection(frame_orig, frame_gray, allow_reject=False)
 
-    def _run_detection(
-        self,
-        frame: np.ndarray,
-        frame_gray: np.ndarray,
-        allow_reject: bool = False
-    ) -> Tuple[Optional[torch.Tensor], str]:
+    def _run_detection(self, frame: np.ndarray, frame_gray: np.ndarray, allow_reject: bool = False) -> Tuple[Optional[torch.Tensor], str]:
         tensor = preprocess_frame(frame, self.input_size, self.device)
         with torch.no_grad():
             pred = self.model(tensor)
 
-        pred_one = {
-            "quality": pred["quality"][0],
-            "angle": pred["angle"][0],
-            "width": pred["width"][0],
-        }
+        pred_one = {"quality": pred["quality"][0], "angle": pred["angle"][0], "width": pred["width"][0]}
         boxes_norm = decode_maps_to_boxes_norm(pred_one, topk=1, q_thresh=self.conf_thresh)
 
         H, W = frame.shape[:2]
@@ -501,10 +473,7 @@ class RobustGraspTracker:
                 fused_center = det_center
 
             if self.track_center is None:
-                if self.current_box_pts is not None:
-                    self.track_center = np.mean(self.current_box_pts, axis=0).astype(np.float32)
-                else:
-                    self.track_center = fused_center.copy()
+                self.track_center = np.mean(self.current_box_pts, axis=0).astype(np.float32)
 
             self.target_center = fused_center.copy()
             step = self._max_step(self.current_box_pts if self.current_box_pts is not None else det_box)
@@ -543,7 +512,6 @@ class RobustGraspTracker:
         self.kf_inited = False
         self.track_center = None
         self.target_center = None
-        # 不清空 pending_click，允许下一帧点选立即生效
 
 
 # =========================
@@ -563,6 +531,7 @@ def parse_args():
     parser.add_argument("--speed-ratio", type=float, default=0.06, help="slew max speed ratio")
     parser.add_argument("--smooth", type=float, default=0.35,
                         help="center move smoothing factor in (0,1], smaller=slower")
+    parser.add_argument("--pub-hz", type=float, default=20.0, help="publish bbox rate (Hz)")
     return parser.parse_args()
 
 
@@ -589,6 +558,10 @@ def main():
     tracker.max_speed_ratio = args.speed_ratio
     tracker.smooth_factor = args.smooth
 
+    # ✅ Publisher：只初始化一次，后面回调里复用
+    publisher = B2Z1CmdPublisher("/event/detection")
+    last_pub_t = 0.0
+    pub_interval = 1.0 / max(0.1, float(args.pub_hz))
 
     # ---- Metavision iterator ----
     mv_iterator = EventsIterator(input_path=args.event_file_path, delta_t=1000)
@@ -617,8 +590,7 @@ def main():
     is_recording = False
 
     # ---- UI flags ----
-    enable_detect_track = False  # 默认关闭：按 V 才开始检测+录制
-    last_status = "Ready"
+    enable_detect_track = False
     debounce_sec = 0.25
     last_key_time = {}
 
@@ -630,11 +602,9 @@ def main():
     ) as window:
 
         def _start_detect_and_record():
-            nonlocal enable_detect_track, is_recording, video_writer, last_status
-
+            nonlocal enable_detect_track, is_recording, video_writer
             enable_detect_track = True
             tracker._reset()
-            last_status = "Detect/Track ON + Recording ON"
             print("▶️ V: Detect/Track ON + Recording ON")
 
             if not is_recording:
@@ -648,11 +618,9 @@ def main():
                 print(f"🎥 Recording started... -> {args.out}")
 
         def _stop_detect_and_record():
-            nonlocal enable_detect_track, is_recording, video_writer, last_status
-
+            nonlocal enable_detect_track, is_recording, video_writer
             enable_detect_track = False
             tracker._reset()
-            last_status = "Detect/Track OFF + Recording OFF"
             print("⏹️ V: Detect/Track OFF + Recording OFF")
 
             if is_recording:
@@ -699,14 +667,13 @@ def main():
         )
 
         def on_cd_frame_cb(ts, cd_frame):
-            nonlocal last_status, is_recording, video_writer, enable_detect_track
+            nonlocal is_recording, video_writer, enable_detect_track, last_pub_t
 
             frame = cd_frame  # BGR uint8
 
             if enable_detect_track:
                 box, status = tracker.get_grasp(frame)
-                frame, center = draw_rect_and_center(frame, box, status)
-                last_status = status
+                frame, center, tl, br = draw_rect_center_and_corners(frame, box, status)
 
                 cv2.putText(frame, status, (15, 35),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
@@ -715,23 +682,41 @@ def main():
                     cx, cy = center
                     cv2.putText(frame, f"Center: ({cx}, {cy})", (15, 65),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    print(f"\r[Center] x={cx}, y={cy}   ", end="", flush=True)
 
-                # 点击重定位的短暂提示（显示当前 track_center）
-                if time.time() < tracker.click_flash_until and tracker.track_center is not None:
-                    mx, my = int(tracker.track_center[0]), int(tracker.track_center[1])
-                    cv2.drawMarker(frame, (mx, my), (255, 255, 255),
-                                   markerType=cv2.MARKER_CROSS, markerSize=18, thickness=2)
-                    cv2.putText(frame, f"Clicked: ({mx}, {my})", (15, 95),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                if tl is not None and br is not None:
+                    x1, y1 = tl
+                    x2, y2 = br
+
+                    cv2.putText(frame, f"TL: ({x1}, {y1})  BR: ({x2}, {y2})", (15, 95),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+                    # 终端输出
+                    if center is not None:
+                        cx, cy = center
+                        print(f"\r[AABB] TL=({x1},{y1}) BR=({x2},{y2}) Center=({cx},{cy})   ",
+                              end="", flush=True)
+                    else:
+                        print(f"\r[AABB] TL=({x1},{y1}) BR=({x2},{y2})   ",
+                              end="", flush=True)
+
+                    # ✅ 节流发送（避免每帧都发导致不“实时”或阻塞）
+                    now = time.time()
+                    if now - last_pub_t >= pub_interval:
+                        publisher.publish(
+
+                            bbox_x1=int(x1), bbox_y1=int(y1),
+                            bbox_x2=int(x2), bbox_y2=int(y2)
+                        )
+                        last_pub_t = now
+
             else:
                 cv2.putText(frame, "Detect/Track OFF (press V)", (15, 35),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-            # show (Metavision window)
+            # show
             window.show_async(frame)
 
-            # show (OpenCV window for mouse click)
+            # show for mouse click
             cv2.imshow(cv2_win_name, frame)
             cv2.waitKey(1)
 
@@ -747,7 +732,6 @@ def main():
             if window.should_close():
                 break
 
-    # 程序退出时兜底释放
     if video_writer is not None:
         video_writer.release()
     cv2.destroyAllWindows()

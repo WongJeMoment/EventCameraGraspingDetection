@@ -27,7 +27,7 @@ from LAGNetwork.matrix_viz import MatrixVisualizer
 # ============================================================
 # 0) Reproducibility
 # ============================================================
-def set_seed(seed: int = 21):
+def set_seed(seed: int = 1):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)

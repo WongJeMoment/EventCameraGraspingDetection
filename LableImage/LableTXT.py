@@ -242,6 +242,6 @@ def main(img_dir: str, out_txt_dir: str):
 
 if __name__ == "__main__":
     # 改成你的路径
-    IMAGE_DIR = "/home/wangzhe/ICME2026/MyDataset/IMG/ba"
-    OUT_TXT_DIR = "/home/wangzhe/ICME2026/MyDataset/Lable/batxt"
+    IMAGE_DIR = "/home/wangzhe/ICME2026/MyDataset/IMG/l"
+    OUT_TXT_DIR = "/home/wangzhe/ICME2026/MyDataset/Lable/l"
     main(IMAGE_DIR, OUT_TXT_DIR)
